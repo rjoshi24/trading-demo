@@ -59,6 +59,49 @@ Outputs land in `results/`:
 | `screener.py` | Per-ticker pipeline: sweep → best config → live signal → proximity → bucket. |
 | `report.py` | Renders the grouped Markdown report. |
 | `run.py` | End-to-end CLI runner. |
+| `quant_core.py` | **Composite swing model** (Part 2): all indicators + a 0–100 score + a ≥10-day-hold swing backtest. |
+| `quant_screener.py` | Per-ticker pipeline for the composite model → BUY NOW / CLOSE TO BUY / HOLD / SELL / WATCH buckets. |
+| `quant_report.py` | Renders the composite-model Markdown report. |
+
+---
+
+## Part 2 — Composite Quant Swing Model (daily, hold ≥ 10 days)
+
+A second, broader model that runs on **daily** candles (open it every day) and is tuned for a
+swing horizon of **at least 10 trading days**. Instead of a per-ticker parameter sweep, it
+applies **one fixed, research-grounded parameter set** to every ticker and blends a handful of
+signals into a single transparent **0–100 score** — so it's simpler and much less curve-fit.
+
+### What goes into the score (and why)
+
+| Signal | Captures | Grounding |
+|---|---|---|
+| **Golden cross regime** (50/200 SMA) + price > 200-SMA | trade with the long-term trend | Faber (2007), *A Quantitative Approach to Tactical Asset Allocation* |
+| **Bull Market Support Band** (20 SMA / 21 EMA) | short-term trend support / reclaim | same band as the weekly BMSB chart |
+| **12-1 time-series momentum** | trend persistence over the past year | Moskowitz, Ooi & Pedersen (2012); Jegadeesh & Titman (1993) |
+| **Volatility squeeze** (Bollinger inside Keltner) | coiled energy that precedes a big move | Bollinger; John Carter's TTM Squeeze |
+| **20-day breakout + volume** | trend ignition on real participation | Turtle-style Donchian breakout |
+| **RSI(14) & MACD(12,26,9)** | momentum confirmation / overbought guard | standard |
+
+### Buckets
+
+| Bucket | Meaning |
+|---|---|
+| `BUY NOW` | Regime bullish, score clears the buy threshold, **and** a fresh trigger fired today (20-day breakout, band reclaim, or squeeze firing up). Act at next open. |
+| `CLOSE TO BUY` | Bullish + high score but **no trigger yet** — a squeeze is coiled, price is within a few % of the 20-day high, or it's hugging the band. Watch these. |
+| `HOLD (UPTREND)` | Already above the band and trending; hold if long, a new buy is chasing. |
+| `SELL / EXIT` | A **fresh** exit: just lost the 20/21 band (after being above it) or a fresh death cross below the 200-SMA. |
+| `WATCH` | Regime and/or score too weak. Nothing to do. |
+| `SKIPPED` | Not enough clean daily history. |
+
+Each row also carries a **≥10-day-hold swing backtest** (win rate, expectancy per $1,000
+trade, avg bars held) so you can gauge each name's historical quality. The backtest enters on
+the trigger, holds **at least 10 bars**, then exits on a band loss / ATR trailing stop / max
+hold (an emergency % stop can fire earlier).
+
+Outputs land in `results/`:
+- `wsb_quant_screen.csv` — full ranked table
+- `wsb_quant_report.md` — grouped, human-readable report
 
 ## Caveat
 
