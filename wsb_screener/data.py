@@ -23,6 +23,77 @@ _SKIP = {"CEO", "USA", "WSB", "YOLO", "FD", "FDA", "CPI", "DD", "EV", "AI",
          "IMO", "ATH", "US", "IV", "OP", "PM", "AH", "RH", "ER", "GDP"}
 
 
+# The most popular / most liquid US names in general (mega-caps, popular retail
+# stocks, and the big ETFs) - so the screener isn't limited to WSB chatter.
+# Curated, deduped, roughly by liquidity/popularity.
+POPULAR_TICKERS = [
+    # mega / large cap tech + leaders
+    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "GOOG", "META", "TSLA", "AVGO", "ORCL",
+    "AMD", "NFLX", "ADBE", "CRM", "CSCO", "QCOM", "TXN", "INTC", "IBM", "AMAT",
+    "MU", "INTU", "NOW", "UBER", "SHOP", "PLTR", "SMCI", "ARM", "PANW", "SNOW",
+    # financials
+    "JPM", "V", "MA", "BAC", "WFC", "GS", "MS", "C", "AXP", "SCHW", "BLK", "SPGI",
+    "PYPL", "SOFI", "COIN", "HOOD",
+    # healthcare
+    "LLY", "UNH", "JNJ", "MRK", "ABBV", "PFE", "TMO", "ABT", "DHR", "BMY", "AMGN", "GILD",
+    # consumer / staples / retail
+    "WMT", "COST", "HD", "LOW", "PG", "KO", "PEP", "MCD", "SBUX", "NKE", "TGT",
+    "DIS", "CMG", "LULU",
+    # industrials / energy / materials
+    "CAT", "GE", "BA", "HON", "UPS", "DE", "LMT", "RTX", "XOM", "CVX", "COP",
+    "OXY", "SLB", "FCX", "NEM",
+    # autos / EV / popular momentum
+    "F", "GM", "RIVN", "NIO", "MSTR", "MARA", "RIOT", "DKNG", "ABNB", "RBLX",
+    # comms / other
+    "T", "VZ", "TMUS", "CMCSA",
+    # big ETFs (index / sector / thematic)
+    "SPY", "QQQ", "IWM", "DIA", "VTI", "XLK", "XLF", "XLE", "XLV", "XLY",
+    "SMH", "SOXX", "ARKK", "GLD", "SLV", "TLT",
+]
+
+
+def get_popular_tickers(top_n: int = 120):
+    """Return [{rank, ticker, mentions, name}, ...] for the most popular / liquid
+    US names in general (mega-caps + popular stocks + big ETFs). `mentions` is a
+    synthetic popularity rank-score so it plays nicely with the WSB schema."""
+    seen, out = set(), []
+    for i, tk in enumerate(POPULAR_TICKERS[:top_n]):
+        if tk in seen:
+            continue
+        seen.add(tk)
+        out.append({"rank": i + 1, "ticker": tk,
+                    "mentions": len(POPULAR_TICKERS) - i, "name": tk, "source": "popular"})
+    return out
+
+
+def get_universe(source: str = "both", top_n: int = 200, popular_n: int = 120):
+    """Build the scan universe.
+      source = "popular" -> most popular US names + ETFs (no network beyond prices)
+      source = "wsb"     -> top-N r/wallstreetbets tickers
+      source = "both"    -> popular first, then WSB names not already included (deduped)
+    Returns a list of dicts with rank/ticker/mentions/name."""
+    src = (source or "both").lower()
+    if src == "popular":
+        return get_popular_tickers(popular_n)
+    if src == "wsb":
+        return get_wsb_tickers(top_n)
+
+    pop = get_popular_tickers(popular_n)
+    have = {d["ticker"] for d in pop}
+    combined = list(pop)
+    try:
+        wsb = get_wsb_tickers(top_n)
+    except Exception as e:
+        print(f"  (WSB fetch failed, using popular list only: {e!r})")
+        wsb = []
+    for d in wsb:
+        if d["ticker"] not in have:
+            have.add(d["ticker"])
+            d = {**d, "source": "wsb"}
+            combined.append(d)
+    return combined
+
+
 def get_wsb_tickers(top_n: int = 200):
     """Return a list of dicts: [{rank, ticker, mentions, name}, ...] for the
     top-N most-mentioned r/wallstreetbets tickers (by mention count)."""
@@ -82,7 +153,14 @@ def download_history(tickers, period="10y", interval="1wk", chunk=40, pause=0.5)
                 if len(batch) == 1:
                     sub = raw.copy()
                     if isinstance(sub.columns, pd.MultiIndex):
-                        sub.columns = sub.columns.get_level_values(0)
+                        # with group_by="ticker" the OHLCV fields can be on either
+                        # level depending on yfinance version/shape -> pick the level
+                        # that actually holds Open/High/Low/Close.
+                        fields = {"Open", "High", "Low", "Close", "Volume"}
+                        if fields & set(sub.columns.get_level_values(0)):
+                            sub.columns = sub.columns.get_level_values(0)
+                        else:
+                            sub.columns = sub.columns.get_level_values(-1)
                 else:
                     sub = raw[ys].copy()
                 tidy = _tidy(sub)
