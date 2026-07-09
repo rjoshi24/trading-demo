@@ -1,7 +1,7 @@
 """
 quant_report.py
 ===============
-Render the composite-swing-model screen (`quant_screener.run_screener` output)
+Render the Snap-Back Swing Model screen (`quant_screener.run_screener` output)
 into a readable Markdown report grouped by bucket.
 """
 from __future__ import annotations
@@ -9,31 +9,28 @@ import datetime as dt
 import pandas as pd
 
 GROUP_BLURB = {
-    "BUY NOW": "Regime is bullish, a **fresh entry trigger fired on the latest daily bar** "
-               "(20-day breakout, band reclaim, or a squeeze firing up) and the composite score "
-               "clears the buy threshold. Act at next open, size with the ATR stop.",
-    "CLOSE TO BUY": "Bullish regime and a **high score, but no trigger yet** -- the setup is "
-                    "building: a volatility squeeze is coiled, price is a few percent under the "
-                    "20-day high, or it's hugging the support band. These are the watch-closely names.",
-    "HOLD (UPTREND)": "Already **above the band and trending**. Hold if you are long; a new buyer "
-                      "here is chasing an extended move (wait for a pullback to the band).",
-    "SELL / EXIT": "An **exit condition is present** -- price lost the 20/21 support band, or a "
-                   "death cross with price below the 200-SMA. If you hold it, the model says exit.",
-    "WATCH": "No setup: regime and/or composite score too weak. Nothing to do yet.",
-    "SKIPPED": "Not enough clean daily history to run the model.",
+    "BUY NOW": "A **dip buy fired today**: price is oversold (RSI-2) and/or stretched >= 1.5 sigma "
+               "below the 20/21 band, confirmed by an up-close / volume surge, with a high score. "
+               "Mean-reversion swing (avg hold ~1 week). Act at next open, size with the stop.",
+    "CLOSE TO BUY": "**Getting oversold / stretching toward the band** but no confirmed trigger yet. "
+                    "Watch for the up-close + volume-surge that flips it to BUY NOW.",
+    "HOLD": "Constructive uptrend, **no fresh dip and not extended**. Hold if long; wait for a "
+            "pullback to buy.",
+    "TAKE PROFIT / SELL": "**Reverted or extended** -- RSI-2 back above 70, or price is >= +2 sigma "
+                          "above the band. The snap-back is done; trim / take profit if long.",
+    "WATCH": "Neutral -- no dip and no trend edge. Nothing to do.",
+    "SKIPPED": "Not enough clean daily history.",
 }
 
-BUY_COLS = ["group_rank", "ticker", "name", "close", "score", "rsi", "mom_12_1_%",
-            "squeeze_on", "vol_ratio", "band_bot", "band_top", "need_move_%",
-            "bt_trades", "bt_winrate_%", "bt_expectancy_$", "note"]
-NEAR_COLS = ["group_rank", "ticker", "name", "close", "score", "pos_vs_band",
-             "prox_high_%", "squeeze_on", "rsi", "mom_12_1_%", "band_bot", "band_top", "note"]
-HOLD_COLS = ["group_rank", "ticker", "name", "close", "score", "rsi", "mom_12_1_%",
-             "band_bot", "band_top", "bt_winrate_%", "bt_expectancy_$"]
-SELL_COLS = ["group_rank", "ticker", "name", "close", "score", "pos_vs_band",
-             "band_bot", "band_top", "rsi", "note"]
-WATCH_COLS = ["group_rank", "ticker", "name", "close", "score", "regime_ok",
-              "pos_vs_band", "rsi", "mom_12_1_%"]
+BUY_COLS = ["group_rank", "ticker", "name", "close", "score", "rsi2", "z_band", "dist_band_%",
+            "vol_surge", "up_close", "band_read", "bt_trades", "bt_winrate_%", "bt_expectancy_$", "note"]
+NEAR_COLS = ["group_rank", "ticker", "name", "close", "score", "rsi2", "z_band", "dist_band_%",
+             "vol_surge", "bt_winrate_%", "band_read", "note"]
+HOLD_COLS = ["group_rank", "ticker", "name", "close", "score", "rsi2", "z_band", "mom_63_%",
+             "bt_winrate_%", "bt_expectancy_$"]
+SELL_COLS = ["group_rank", "ticker", "name", "close", "score", "rsi2", "z_band", "dist_band_%",
+             "band_read", "note"]
+WATCH_COLS = ["group_rank", "ticker", "name", "close", "score", "rsi2", "z_band", "above_50", "mom_63_%"]
 
 
 def _md_table(df: pd.DataFrame, cols) -> str:
@@ -60,32 +57,32 @@ def build_markdown(df: pd.DataFrame, universe_n: int, signal_date: str) -> str:
     counts = df["group"].value_counts().to_dict()
 
     out = []
-    out.append("# WSB Composite Swing-Model Screen\n")
+    out.append("# WSB Snap-Back Swing Screen\n")
     out.append(f"_Generated {now} | latest daily bar: **{signal_date}** | "
                f"universe: top {universe_n} r/wallstreetbets tickers by mention count_\n")
-    out.append("> **Research only, not financial advice.** A single fixed, research-grounded "
-               "parameter set is applied to every ticker (no per-ticker curve-fitting). Signals are "
-               "tuned for a swing horizon of **>= 10 trading days**.\n")
+    out.append("> **Research only, not financial advice.** A mean-reversion swing model: buy stretched / "
+               "oversold dips confirmed by buying volume, sell when they revert or extend. No 200-SMA, "
+               "no requirement to be above the band.\n")
 
     out.append("## The model in one paragraph\n")
-    out.append("Each ticker gets a transparent **0-100 composite score** blending: the **golden-cross "
-               "regime** (50/200 SMA) + long-trend filter, the **Bull Market Support Band** (20 SMA / "
-               "21 EMA), **12-1 time-series momentum**, **MACD** and **RSI**, a **volatility squeeze** "
-               "(Bollinger inside Keltner -- fires *before* big moves), and a **20-day breakout + "
-               "volume** check. A ticker becomes **BUY NOW** only when the regime is bullish, the score "
-               "is high, and a fresh entry trigger fires on the latest bar.\n")
+    out.append("Each ticker gets a **0-100 score** from the signals that actually tested well: **RSI-2 "
+               "oversold**, **stretch from the 20/21 band in standard deviations** (`z_band` -- because "
+               "stocks retrace toward the band whether they're above or below it), a **volume surge** "
+               "(buying-power confirmation), a **reversal up-close**, and a *soft* (non-gating) trend "
+               "context. A name is **BUY NOW** when a dip trigger fires with a high score. Backtested "
+               "~68% win rate over 6y on 45 liquid names.\n")
 
     out.append("## How to read this\n")
-    out.append("- **score** 0-100 = overall attractiveness (regime + momentum + setup).\n"
-               "- **need_move_%** / **prox_high_%** = % move to the nearest trigger (the 20-day high "
-               "or a band reclaim).\n"
-               "- **squeeze_on** = volatility is coiled (a big move tends to follow).\n"
-               "- **bt_*** = a >=10-day-hold swing backtest on this ticker (win rate, expectancy per "
-               "$1,000 trade) so you can gauge each name's historical quality.\n")
+    out.append("- **score** 0-100 = how good the dip-buy setup is right now.\n"
+               "- **z_band** = standard deviations from the band. Negative = stretched below (bounce "
+               "zone); ~ +2 or more = extended above (retrace risk).\n"
+               "- **vol_surge** = today's volume / 20-day average (>= 1.5x = buyers stepping in).\n"
+               "- **bt_*** = the snap-back swing backtest on this ticker (win rate, expectancy per "
+               "$1,000 trade).\n")
 
     out.append("## Summary\n")
     out.append("| Group | Count |\n| --- | --- |")
-    for g in ["BUY NOW", "CLOSE TO BUY", "HOLD (UPTREND)", "SELL / EXIT", "WATCH", "SKIPPED"]:
+    for g in ["BUY NOW", "CLOSE TO BUY", "HOLD", "TAKE PROFIT / SELL", "WATCH", "SKIPPED"]:
         if g in counts:
             out.append(f"| {g} | {counts[g]} |")
     out.append("")
@@ -93,15 +90,15 @@ def build_markdown(df: pd.DataFrame, universe_n: int, signal_date: str) -> str:
     sections = [
         ("BUY NOW", BUY_COLS),
         ("CLOSE TO BUY", NEAR_COLS),
-        ("HOLD (UPTREND)", HOLD_COLS),
-        ("SELL / EXIT", SELL_COLS),
+        ("HOLD", HOLD_COLS),
+        ("TAKE PROFIT / SELL", SELL_COLS),
         ("WATCH", WATCH_COLS),
     ]
     for g, cols in sections:
         sub = df[df["group"] == g]
         out.append(f"## {g}  ({len(sub)})\n")
         out.append(GROUP_BLURB.get(g, "") + "\n")
-        if g == "WATCH" and len(sub) > 40:
+        if g in ("WATCH", "HOLD") and len(sub) > 40:
             out.append(_md_table(sub.head(40), cols))
             out.append(f"\n_...and {len(sub) - 40} more._\n")
         else:
