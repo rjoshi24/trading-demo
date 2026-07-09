@@ -28,12 +28,16 @@ def main():
     ap.add_argument("--top", type=int, default=120, help="how many WSB tickers")
     ap.add_argument("--popular", type=int, default=120, help="how many popular tickers")
     ap.add_argument("--period", default="5y", help="daily history length")
-    ap.add_argument("--stop", type=float, default=0.05, help="hard stop per trade (e.g. 0.05)")
+    ap.add_argument("--stop", type=float, default=0.06, help="initial stop per trade (e.g. 0.06)")
+    ap.add_argument("--ride", default="chandelier",
+                    choices=["chandelier", "chandelier_wide", "pct", "sma50"],
+                    help="how winners ride (trailing exit)")
     ap.add_argument("--outdir", default="results")
     args = ap.parse_args()
 
     import wsb_screener.quant_core as qc
     qc.STOP_PCT = args.stop
+    qc.RIDE_MODE = args.ride
     os.makedirs(args.outdir, exist_ok=True)
     t0 = time.time()
 
@@ -52,8 +56,9 @@ def main():
     sig_dates = df["signal_date"].dropna() if "signal_date" in df else []
     signal_date = sig_dates.mode().iloc[0] if len(sig_dates) else "n/a"
 
-    print(f"      running $100 portfolio backtest (stop {args.stop:.0%}) ...")
-    port = portfolio_backtest(hist, start_cash=100.0, max_positions=8, stop_pct=args.stop)
+    print(f"      running $100 portfolio backtest (stop {args.stop:.0%}, ride {args.ride}) ...")
+    port = portfolio_backtest(hist, start_cash=100.0, max_positions=8, stop_pct=args.stop,
+                              ride_mode=args.ride)
 
     print("[4/4] Writing outputs ...")
     csv_path = os.path.join(args.outdir, "wsb_quant_screen.csv")

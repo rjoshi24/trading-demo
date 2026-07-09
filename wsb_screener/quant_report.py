@@ -10,27 +10,29 @@ import pandas as pd
 
 GROUP_BLURB = {
     "BUY NOW": "**High-conviction dip buys firing today.** Oversold (RSI-2) and/or stretched "
-               ">= 1.5 sigma below the 20/21 band, and this name has a **proven historical win rate**. "
-               "Buy at next open; ride to the z-target; hard stop cuts it if wrong.",
-    "SELL / EXIT": "**A model position just exited on the latest bar** - this is the only time SELL "
-                   "matters. Either the **stop hit** (the buy was wrong - cut it, you can re-enter on "
-                   "the next dip) or the **z-target was reached** (mean-reversion thesis complete - take profit).",
-    "HOLDING (RIDE)": "**Entered on a prior dip and still riding** toward the target. If it's a strong "
-                      "name it rides to z>=+1.5 (momentum); the stop still protects it.",
-    "CLOSE TO BUY": "A dip fired with a **moderate/unproven** edge, or price is sliding into the buy "
+               ">= 1.5 sigma below the 20/21 band, in names whose dip-and-ride history is a **proven "
+               "money-maker (profit factor gate)** with a **big average win**. Buy at next open; cut "
+               "small if wrong; ride the trend if right.",
+    "SELL / EXIT": "**A model position just exited on the latest bar.** Either the **stop hit** (loser "
+                   "cut small - re-enter on the next dip) or the **trailing stop hit** (trend broke - "
+                   "lock in the ride, usually a win).",
+    "HOLDING (RIDE)": "**Entered on a prior dip and still riding the trend.** No fixed take-profit - it "
+                      "runs until the trailing stop; the initial stop protected the downside.",
+    "CLOSE TO BUY": "A dip fired with a **thinner/unproven** edge, or price is sliding into the buy "
                     "zone. Watch for a high-conviction trigger.",
     "WATCH": "No dip. Nothing to do.",
     "SKIPPED": "Not enough clean daily history.",
 }
 
-BUY_COLS  = ["group_rank", "ticker", "name", "close", "score", "rsi2", "z_band", "dist_band_%",
-             "vol_surge", "bt_winrate_%", "exit_plan", "stop_%", "band_read", "note"]
+BUY_COLS  = ["group_rank", "ticker", "name", "close", "score", "rsi2", "z_band",
+             "bt_profit_factor", "bt_avg_win_%", "bt_winrate_%", "bt_max_win_%",
+             "exit_plan", "band_read", "note"]
 SELL_COLS = ["group_rank", "ticker", "name", "close", "entry_price", "pos_ret_%", "exit_reason",
              "z_band", "note"]
 HOLD_COLS = ["group_rank", "ticker", "name", "close", "entry_price", "pos_gain_%", "bars_held",
              "z_band", "exit_plan", "stop_%"]
 NEAR_COLS = ["group_rank", "ticker", "name", "close", "score", "rsi2", "z_band", "dist_band_%",
-             "vol_surge", "bt_winrate_%", "band_read", "note"]
+             "vol_surge", "bt_profit_factor", "bt_avg_win_%", "band_read", "note"]
 WATCH_COLS = ["group_rank", "ticker", "name", "close", "score", "rsi2", "z_band", "above_50", "mom_63_%"]
 
 
@@ -59,27 +61,28 @@ def build_markdown(df: pd.DataFrame, universe_n: int, signal_date: str,
     counts = df["group"].value_counts().to_dict()
 
     out = []
-    out.append("# Dip-Buy Swing Screen\n")
+    out.append("# Dip-and-Ride Swing Screen\n")
     out.append(f"_Generated {now} | latest daily bar: **{signal_date}** | universe: {universe_n} names "
                "(most popular US stocks + ETFs, plus WSB)_\n")
-    out.append("> **Research only, not financial advice.** Buy high-conviction dips (oversold / stretched "
-               "below the band); cut fast with a hard stop if wrong; ride winners to an adaptive z-target.\n")
+    out.append("> **Research only, not financial advice.** Buy dips, cut losers small with an initial "
+               "stop, and RIDE winners with a trailing stop - small losses, big wins.\n")
 
     out.append("## The model in one paragraph\n")
     out.append("Buy a **dip** - RSI-2 oversold and/or price stretched **>= 1.5 std-devs below the 20/21 "
-               "band** (`z_band`) - only in names with a **proven historical win rate** (conviction). "
-               "Exit is regime-adaptive: **ride momentum** in strong names (to `z>=+1.5`), take the quick "
-               "bounce in weak ones (`z>=0`), and a **hard stop** cuts a bad buy fast (you can re-enter). "
-               "SELL only shows when a position actually exits.\n")
+               "band** (`z_band`). **Cut it small** if wrong (initial stop). If it works, there is **no "
+               "1-2% take-profit** - a **trailing stop rides the trend** so the average win is large "
+               "(often +15-50%) and the occasional monster runs. Because we ride, win rate is lower, so "
+               "BUY signals are gated by **profit factor** (a proven money-maker), not win rate. SELL "
+               "only shows when a real position exits (stop = small loss; trail = locked-in ride).\n")
 
     if portfolio:
         p = portfolio
         out.append("## $100 portfolio backtest\n")
         out.append(f"Giving the strategy **${p['start_$']:.0f}** across this universe "
-                   f"(max {p['max_positions']} positions, {p['stop_pct']*100:.0f}% stop): "
-                   f"**${p['final_$']:.2f}** ({p['return_%']:+.0f}%, CAGR {p['CAGR_%']}%/yr, "
-                   f"max drawdown {p['max_drawdown_%']}%, {p['trades']} trades, "
-                   f"{p['win_rate_%']}% win rate).\n")
+                   f"(max {p['max_positions']} positions, {p['stop_pct']*100:.0f}% initial stop, "
+                   f"ride={p['ride_mode']}): **${p['final_$']:.2f}** ({p['return_%']:+.0f}%, "
+                   f"CAGR {p['CAGR_%']}%/yr, max drawdown {p['max_drawdown_%']}%, {p['trades']} trades, "
+                   f"{p['win_rate_%']}% win rate, avg win +{p['avg_win_%']}%).\n")
 
     out.append("## Summary\n")
     out.append("| Group | Count |\n| --- | --- |")
