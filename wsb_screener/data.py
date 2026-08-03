@@ -133,20 +133,48 @@ def _tidy(df: pd.DataFrame) -> pd.DataFrame | None:
     return df if len(df) else None
 
 
-def download_history(tickers, period="10y", interval="1wk", chunk=40, pause=0.5):
-    """Batch-download OHLCV for many tickers. Returns {ticker: tidy DataFrame}.
-    Tickers with no data are simply omitted."""
-    ymap = {yf_symbol(t): t for t in tickers}
-    ysyms = list(ymap.keys())
+def download_history(tickers, period="10y", interval="1wk", chunk=40, pause=0.5,
+                     return_failures=False):
+    """Batch-download OHLCV for many tickers.
+
+    By default, return the backward-compatible ``{ticker: tidy DataFrame}``
+    mapping and omit unsuccessful symbols. When ``return_failures=True``,
+    return ``(history, failures)`` where failures is keyed by original ticker
+    and each value contains ``error_stage``, ``error_type``, and
+    ``error_message``.
+    """
+    ymap = {}
+    for ticker in dict.fromkeys(tickers):
+        ymap.setdefault(yf_symbol(ticker), []).append(ticker)
+    ysyms = list(ymap)
     result = {}
+    failures = {}
+
+    def record_failure(yahoo_symbol, stage, error_type, message):
+        for original in ymap.get(yahoo_symbol, [yahoo_symbol]):
+            failures[original] = {
+                "ticker": original,
+                "error_stage": stage,
+                "error_type": error_type,
+                "error_message": str(message),
+            }
+
     for i in range(0, len(ysyms), chunk):
         batch = ysyms[i:i + chunk]
         try:
             raw = yf.download(batch, period=period, interval=interval,
                               auto_adjust=True, progress=False,
                               group_by="ticker", threads=True)
-        except Exception as e:
-            print(f"  batch {i//chunk} download error: {e!r}")
+        except Exception as exc:
+            print(f"  batch {i//chunk} download error: {exc!r}")
+            for ys in batch:
+                record_failure(ys, "download", type(exc).__name__, str(exc))
+            continue
+        if raw is None or raw.empty:
+            for ys in batch:
+                record_failure(ys, "no_data", "NoDataError",
+                               "provider returned no data for the symbol")
+            time.sleep(pause)
             continue
         for ys in batch:
             try:
@@ -162,11 +190,31 @@ def download_history(tickers, period="10y", interval="1wk", chunk=40, pause=0.5)
                         else:
                             sub.columns = sub.columns.get_level_values(-1)
                 else:
-                    sub = raw[ys].copy()
+                    if not isinstance(raw.columns, pd.MultiIndex):
+                        raise ValueError("multi-symbol response has no per-symbol columns")
+                    first_level = raw.columns.get_level_values(0)
+                    last_level = raw.columns.get_level_values(-1)
+                    if ys in first_level:
+                        sub = raw[ys].copy()
+                    elif ys in last_level:
+                        sub = raw.xs(ys, axis=1, level=-1).copy()
+                    else:
+                        record_failure(ys, "no_data", "NoDataError",
+                                       "provider response omitted the symbol")
+                        continue
                 tidy = _tidy(sub)
-                if tidy is not None:
-                    result[ymap[ys]] = tidy
-            except Exception:
-                continue
+                if tidy is None:
+                    record_failure(ys, "no_data", "NoDataError",
+                                   "provider returned no usable OHLCV rows")
+                    continue
+                for original in ymap[ys]:
+                    result[original] = tidy.copy()
+            except Exception as exc:
+                originals = ymap.get(ys, [ys])
+                print(f"  {', '.join(originals)} history normalization error: "
+                      f"{type(exc).__name__}: {exc}")
+                record_failure(ys, "normalization", type(exc).__name__, str(exc))
         time.sleep(pause)
+    if return_failures:
+        return result, failures
     return result

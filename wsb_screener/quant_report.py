@@ -1,39 +1,37 @@
-"""
-quant_report.py
-===============
-Render the Dip-Buy Swing Model screen into a Markdown report grouped by bucket.
-Buy-focused, with position-aware SELL / HOLDING sections.
-"""
+"""Render the daily quant-model screen as a grouped Markdown research report."""
 from __future__ import annotations
 import datetime as dt
 import pandas as pd
 
 GROUP_BLURB = {
-    "BUY NOW": "**High-conviction dip buys firing today.** Oversold (RSI-2) and/or stretched "
-               ">= 1.5 sigma below the 20/21 band, in names whose dip-and-ride history is a **proven "
-               "money-maker (profit factor gate)** with a **big average win**. Buy at next open; cut "
-               "small if wrong; ride the trend if right.",
-    "SELL / EXIT": "**A model position just exited on the latest bar.** Either the **stop hit** (loser "
-                   "cut small - re-enter on the next dip) or the **trailing stop hit** (trend broke - "
-                   "lock in the ride, usually a win).",
-    "HOLDING (RIDE)": "**Entered on a prior dip and still riding the trend.** No fixed take-profit - it "
-                      "runs until the trailing stop; the initial stop protected the downside.",
-    "CLOSE TO BUY": "A dip fired with a **thinner/unproven** edge, or price is sliding into the buy "
-                    "zone. Watch for a high-conviction trigger.",
-    "WATCH": "No dip. Nothing to do.",
-    "SKIPPED": "Not enough clean daily history.",
+    "BUY NOW": "**The model produced an entry signal while flat.** The label describes simulated "
+               "model state, not a recommendation. Any modeled entry occurs at the next open.",
+    "EXIT PENDING": "**The latest close crossed an exit threshold.** The modeled position remains "
+                    "open until the next available open, which can gap beyond the threshold.",
+    "SELL / EXIT": "**A modeled position exited at the latest open.** Initial and trailing exit "
+                   "thresholds are evaluated on the prior close; the next open can gap beyond them.",
+    "HOLDING (RIDE)": "**The model already holds one position.** It does not pyramid, so a new dip "
+                      "signal while holding is informational and never becomes another entry label.",
+    "CLOSE TO BUY": "The model sees a dip signal with thinner or limited history, or price is moving "
+                    "toward its dip zone.",
+    "WATCH": "No current model entry signal.",
+    "SKIPPED": "Price data was acquired, but the model could not run because history or indicators were insufficient.",
+    "ERROR": "A data download/normalization/no-data failure or model error occurred. See `error_stage` for provenance.",
 }
 
-BUY_COLS  = ["group_rank", "ticker", "name", "close", "score", "rsi2", "z_band",
-             "bt_profit_factor", "bt_avg_win_%", "bt_winrate_%", "bt_max_win_%",
-             "exit_plan", "band_read", "note"]
+BUY_COLS = ["group_rank", "ticker", "name", "close", "score", "rsi2", "z_band",
+            "bt_profit_factor", "bt_avg_win_%", "bt_winrate_%", "bt_max_win_%",
+            "exit_plan", "band_read", "note"]
 SELL_COLS = ["group_rank", "ticker", "name", "close", "entry_price", "pos_ret_%", "exit_reason",
              "z_band", "note"]
+PENDING_COLS = ["group_rank", "ticker", "name", "close", "entry_price", "pos_gain_%",
+                "exit_reason", "initial_close_level", "trailing_close_level", "note"]
 HOLD_COLS = ["group_rank", "ticker", "name", "close", "entry_price", "pos_gain_%", "bars_held",
-             "z_band", "exit_plan", "stop_%"]
+             "z_band", "exit_plan", "close_exit_threshold_%", "note"]
 NEAR_COLS = ["group_rank", "ticker", "name", "close", "score", "rsi2", "z_band", "dist_band_%",
              "vol_surge", "bt_profit_factor", "bt_avg_win_%", "band_read", "note"]
 WATCH_COLS = ["group_rank", "ticker", "name", "close", "score", "rsi2", "z_band", "above_50", "mom_63_%"]
+ERROR_COLS = ["group_rank", "ticker", "name", "error_stage", "error_type", "error_message", "note"]
 
 
 def _md_table(df: pd.DataFrame, cols) -> str:
@@ -44,13 +42,13 @@ def _md_table(df: pd.DataFrame, cols) -> str:
     header = "| " + " | ".join(cols) + " |"
     sep = "| " + " | ".join("---" for _ in cols) + " |"
     lines = [header, sep]
-    for _, r in view.iterrows():
+    for _, row in view.iterrows():
         cells = []
-        for c in cols:
-            v = r[c]
-            if isinstance(v, float):
-                v = f"{v:,.2f}"
-            cells.append(str(v))
+        for col in cols:
+            value = row[col]
+            if isinstance(value, float):
+                value = f"{value:,.2f}"
+            cells.append(str(value).replace("|", "\\|"))
         lines.append("| " + " | ".join(cells) + " |")
     return "\n".join(lines) + "\n"
 
@@ -60,56 +58,69 @@ def build_markdown(df: pd.DataFrame, universe_n: int, signal_date: str,
     now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
     counts = df["group"].value_counts().to_dict()
 
-    out = []
-    out.append("# Dip-and-Ride Swing Screen\n")
-    out.append(f"_Generated {now} | latest daily bar: **{signal_date}** | universe: {universe_n} names "
-               "(most popular US stocks + ETFs, plus WSB)_\n")
-    out.append("> **Research only, not financial advice.** Buy dips, cut losers small with an initial "
-               "stop, and RIDE winners with a trailing stop - small losses, big wins.\n")
+    out = ["# Dip-and-Ride Model Screen\n"]
+    out.append(f"_Generated {now} | latest daily bar: **{signal_date}** | requested universe: "
+               f"{universe_n} names_\n")
+    out.append("> **Research software only; not financial advice or a trading recommendation.** "
+               "Bucket names describe model output. Historical statistics are in-sample diagnostics, "
+               "not evidence of future performance.\n")
 
-    out.append("## The model in one paragraph\n")
-    out.append("Buy a **dip** - RSI-2 oversold and/or price stretched **>= 1.5 std-devs below the 20/21 "
-               "band** (`z_band`). **Cut it small** if wrong (initial stop). If it works, there is **no "
-               "1-2% take-profit** - a **trailing stop rides the trend** so the average win is large "
-               "(often +15-50%) and the occasional monster runs. Because we ride, win rate is lower, so "
-               "BUY signals are gated by **profit factor** (a proven money-maker), not win rate. SELL "
-               "only shows when a real position exits (stop = small loss; trail = locked-in ride).\n")
+    out.append("## Model and execution assumptions\n")
+    out.append("A daily dip signal is based on RSI-2 and/or distance below the 20-SMA/21-EMA band. "
+               "One position per ticker is entered at the following open. Initial and trailing exit "
+               "thresholds are evaluated only on daily closes and filled at the next available open. "
+               "They are **not hard or resting stop orders**: overnight gaps can make realized losses "
+               "materially larger than the configured threshold. Fees, slippage, liquidity, taxes, "
+               "corporate actions beyond the data vendor's adjustments, and market impact are omitted.\n")
 
     if portfolio:
         p = portfolio
-        out.append("## $100 portfolio backtest\n")
-        out.append(f"Giving the strategy **${p['start_$']:.0f}** across this universe "
-                   f"(max {p['max_positions']} positions, {p['stop_pct']*100:.0f}% initial stop, "
-                   f"ride={p['ride_mode']}): **${p['final_$']:.2f}** ({p['return_%']:+.0f}%, "
-                   f"CAGR {p['CAGR_%']}%/yr, max drawdown {p['max_drawdown_%']}%, {p['trades']} trades, "
-                   f"{p['win_rate_%']}% win rate, avg win +{p['avg_win_%']}%).\n")
+        out.append("## $100 portfolio simulation\n")
+        out.append(f"Across {p['tickers_backtested']}/{p['tickers_requested']} downloaded tickers "
+                   f"(max {p['max_positions']} positions, {p['close_exit_pct']:.0%} close-exit threshold, "
+                   f"ride={p['ride_mode']}), the simulation changes **${p['start_$']:.0f}** to "
+                   f"**${p['final_$']:.2f}** ({p['return_%']:+.1f}%; CAGR {p['CAGR_%']}%; max drawdown "
+                   f"{p['max_drawdown_%']}%; {p['trades']} completed trades; win rate "
+                   f"{p['win_rate_%']}%). This is a simplified historical simulation, not an "
+                   "investable performance record.\n")
+        errors = p.get("model_errors", [])
+        if errors:
+            out.append(f"**Coverage warning:** {len(errors)} ticker(s) failed during portfolio modeling "
+                       "and were excluded:\n")
+            out.extend(f"- `{e['ticker']}` — {e['error_type']}: {e['error_message']}" for e in errors)
+            out.append("")
 
     out.append("## Summary\n")
     out.append("| Group | Count |\n| --- | --- |")
-    for g in ["BUY NOW", "SELL / EXIT", "HOLDING (RIDE)", "CLOSE TO BUY", "WATCH", "SKIPPED"]:
-        if g in counts:
-            out.append(f"| {g} | {counts[g]} |")
+    for group in ["BUY NOW", "EXIT PENDING", "SELL / EXIT", "HOLDING (RIDE)", "CLOSE TO BUY", "WATCH", "SKIPPED", "ERROR"]:
+        if group in counts:
+            out.append(f"| {group} | {counts[group]} |")
     out.append("")
 
     sections = [
         ("BUY NOW", BUY_COLS),
+        ("EXIT PENDING", PENDING_COLS),
         ("SELL / EXIT", SELL_COLS),
         ("HOLDING (RIDE)", HOLD_COLS),
         ("CLOSE TO BUY", NEAR_COLS),
         ("WATCH", WATCH_COLS),
     ]
-    for g, cols in sections:
-        sub = df[df["group"] == g]
-        out.append(f"## {g}  ({len(sub)})\n")
-        out.append(GROUP_BLURB.get(g, "") + "\n")
-        if g in ("WATCH", "HOLDING (RIDE)") and len(sub) > 40:
+    for group, cols in sections:
+        sub = df[df["group"] == group]
+        out.append(f"## {group} ({len(sub)})\n")
+        out.append(GROUP_BLURB[group] + "\n")
+        if group in ("WATCH", "HOLDING (RIDE)") and len(sub) > 40:
             out.append(_md_table(sub.head(40), cols))
             out.append(f"\n_...and {len(sub) - 40} more._\n")
         else:
             out.append(_md_table(sub, cols))
 
-    skipped = df[df["group"] == "SKIPPED"]
-    if not skipped.empty:
-        out.append(f"## SKIPPED  ({len(skipped)})\n")
-        out.append(", ".join(f"{r.ticker}" for _, r in skipped.iterrows()) + "\n")
+    for group, cols in (("SKIPPED", ["group_rank", "ticker", "name", "bars", "note"]),
+                        ("ERROR", ERROR_COLS)):
+        sub = df[df["group"] == group]
+        if not sub.empty:
+            out.append(f"## {group} ({len(sub)})\n")
+            out.append(GROUP_BLURB[group] + "\n")
+            out.append(_md_table(sub, cols))
+
     return "\n".join(out)

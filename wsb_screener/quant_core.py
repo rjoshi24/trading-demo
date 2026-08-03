@@ -1,31 +1,33 @@
 """
 quant_core.py
 =============
-**Dip-and-Ride Swing Model** - buy dips, cut losers small, ride winners big.
+**Dip-and-Ride Swing Model** - identify dips, exit weak positions, and let
+strong positions run.
 
-Rebuilt from a ride-exit study (6y, 110 popular tickers). The whole point:
-we are NOT scalping 1-2%. We buy a dip, cut it fast if it's wrong, and then
-**ride the winners with a trailing stop** so the average win is large (~15-50%)
-and the occasional monster (100%+) runs. Small losses, fat right tail.
+This is a transparent research model, not a claim of a proven trading edge.
+It enters after a dip signal and manages a single open position per ticker.
 
-* **Entry (dip):** oversold (RSI-2 < 10) and/or stretched **>= 1.5 std-devs below
-  the 20/21 band** (`z_band`). Good timing to get in cheap.
-* **Cut losers easily:** a fixed **initial stop** (default 6%) below the entry.
-* **Ride winners (no take-profit):** once in profit, a **trailing stop** rides the
-  trend and only exits when the trend breaks. Modes:
-    - `chandelier` (default): trail `TRAIL_ATR_MULT x ATR` below the run-up high
-      -> avg win ~15%, expectancy ~+2%/trade, keeps the big tail.
-    - `chandelier_wide`: 5x ATR -> avg win ~25%, even fatter tail.
-    - `pct`: trail a fixed % (e.g. 25%) below the peak -> biggest avg wins (~40%+).
-    - `sma50`: exit on a close back below the 50-SMA -> higher win rate, smaller avg win.
-* **No 200-SMA, no "must be above band"** - stocks retrace, we buy the stretch.
+* **Entry signal:** oversold (RSI-2 < 10) and/or stretched **>= 1.5 std-devs below
+  the 20/21 band** (`z_band`).
+* **Initial close-exit threshold:** by default, a close 6% below entry triggers an
+  exit at the next available open.
+* **Ride winners (no take-profit):** after a favorable move, one of four trailing
+  close thresholds determines a next-open exit:
+    - `chandelier` (default): `TRAIL_ATR_MULT x ATR` below the run-up high.
+    - `chandelier_wide`: 5x ATR below the run-up high.
+    - `pct`: a fixed percentage below the peak.
+    - `sma50`: a close below the 50-day SMA.
+* **Execution limitation:** these are close-triggered, next-open simulations, not
+  resting stop orders. A gap can make the realized exit materially worse than the
+  threshold, and fees, slippage, liquidity, taxes, and market impact are omitted.
 
-Because we ride, WIN RATE is lower (~40-55%) but **avg win >> avg loss**. So we
-gate BUY signals by **profit factor / expectancy**, not win rate.
+Historical profit factor and expectancy are displayed as descriptive backtest
+statistics; they are not evidence that future signals will be profitable.
 
     Research only, not financial advice.
 """
 from __future__ import annotations
+from dataclasses import dataclass
 import heapq
 import numpy as np
 import pandas as pd
@@ -47,12 +49,36 @@ Z_BUY       = -1.5
 RSI_OS      = 10.0
 RSI_OS_SOFT = 25.0
 
-# risk / ride
-STOP_PCT       = 0.06     # initial hard stop = cut losers (tested; 6% good balance)
-RIDE_MODE      = "chandelier"   # "chandelier" | "chandelier_wide" | "pct" | "sma50"
+# execution / ride configuration
+DEFAULT_CLOSE_EXIT_PCT = 0.06
+DEFAULT_RIDE_MODE = "chandelier"
+VALID_RIDE_MODES = ("chandelier", "chandelier_wide", "pct", "sma50")
 TRAIL_ATR_MULT = 3.0      # chandelier ATR multiple (chandelier_wide uses 5x)
-TRAIL_PCT      = 0.25     # for RIDE_MODE="pct": trail 25% below the peak
+TRAIL_PCT      = 0.25     # for ride_mode="pct": trail 25% below the peak
 MAX_HOLD       = 250      # ~1y time cap so real trends can fully run
+
+
+@dataclass(frozen=True)
+class QuantConfig:
+    """Runtime settings passed explicitly through the quant pipeline.
+
+    Exit thresholds are evaluated on a daily close and filled at the next
+    available open. They are not resting stop orders and do not cap losses:
+    overnight gaps and unmodeled slippage can produce a materially worse fill.
+    """
+
+    close_exit_pct: float = DEFAULT_CLOSE_EXIT_PCT
+    ride_mode: str = DEFAULT_RIDE_MODE
+
+    def __post_init__(self) -> None:
+        if not 0 < self.close_exit_pct < 1:
+            raise ValueError("close_exit_pct must be between 0 and 1")
+        if self.ride_mode not in VALID_RIDE_MODES:
+            choices = ", ".join(VALID_RIDE_MODES)
+            raise ValueError(f"ride_mode must be one of: {choices}")
+
+
+DEFAULT_CONFIG = QuantConfig()
 
 # conviction score weights (sum to 1.0)
 W_OVERSOLD  = 0.30
@@ -90,6 +116,29 @@ def _ride_params(ride_mode: str):
     if ride_mode == "sma50":
         return "sma50", None, None
     return "chandelier", TRAIL_ATR_MULT, None
+
+
+def _close_exit_state(close: float, entry_price: float, peak: float,
+                      atr_value: float, sma50: float, bars_held: int,
+                      config: QuantConfig) -> tuple[str | None, float, float]:
+    """Return the close-trigger reason plus initial/trailing threshold levels."""
+    mode, atr_mult, trail_pct = _ride_params(config.ride_mode)
+    initial_level = entry_price * (1 - config.close_exit_pct)
+    if mode == "chandelier":
+        trailing_level = peak - atr_mult * atr_value
+    elif mode == "pct":
+        trailing_level = peak * (1 - trail_pct)
+    else:
+        trailing_level = sma50
+
+    if close <= initial_level:
+        return "initial_close", initial_level, trailing_level
+    if (np.isfinite(trailing_level) and close < trailing_level
+            and trailing_level > initial_level):
+        return "trailing_close", initial_level, trailing_level
+    if bars_held >= MAX_HOLD:
+        return "time", initial_level, trailing_level
+    return None, initial_level, trailing_level
 
 
 def compute_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -150,12 +199,14 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ----------------------------- single-name backtest -----------------------------
-def swing_backtest(df: pd.DataFrame, capital: float = CAPITAL, stop_pct: float = STOP_PCT,
-                   ride_mode: str | None = None):
-    """Buy next open on a dip. Cut losers at the initial stop (`stop_pct`). Once
-    in profit, ride with a trailing stop (per `ride_mode`) until the trend breaks.
-    No fixed take-profit - winners run."""
-    mode, atr_mult, trail_pct = _ride_params(ride_mode or RIDE_MODE)
+def swing_backtest(df: pd.DataFrame, capital: float = CAPITAL,
+                   config: QuantConfig = DEFAULT_CONFIG):
+    """Buy at the next open after a dip signal and manage one position at a time.
+
+    Initial and trailing thresholds are tested against each daily close. An exit
+    is filled at the next open, so the configured percentage is a trigger rather
+    than a guaranteed fill price. Overnight gaps and slippage are not modeled.
+    """
     d = compute_features(df)
     n = len(d)
     C = d["Close"].to_numpy(float); O = d["Open"].to_numpy(float); Hg = d["High"].to_numpy(float)
@@ -170,21 +221,10 @@ def swing_backtest(df: pd.DataFrame, capital: float = CAPITAL, stop_pct: float =
                 pos = {"entry_date": date[i + 1], "entry_price": O[i + 1], "entry_i": i + 1, "peak": C[i]}
         else:
             pos["peak"] = max(pos["peak"], Hg[i]); held = i - pos["entry_i"]
-            init_level = pos["entry_price"] * (1 - stop_pct)
-            if mode == "chandelier":
-                trail_level = pos["peak"] - atr_mult * ATRv[i]
-            elif mode == "pct":
-                trail_level = pos["peak"] * (1 - trail_pct)
-            else:  # sma50
-                trail_level = S50[i]
-            ex, reason = False, ""
-            if C[i] <= init_level:
-                ex, reason = True, "stop"                     # loser cut
-            elif np.isfinite(trail_level) and C[i] < trail_level and trail_level > init_level:
-                ex, reason = True, "trail"                    # trend broke -> lock the ride
-            elif held >= MAX_HOLD:
-                ex, reason = True, "time"
-            if ex:
+            reason, _, _ = _close_exit_state(
+                C[i], pos["entry_price"], pos["peak"], ATRv[i], S50[i], held, config,
+            )
+            if reason is not None:
                 xp = O[i + 1]; ret = (xp - pos["entry_price"]) / pos["entry_price"]
                 trades.append({**pos, "exit_date": date[i + 1], "exit_price": xp, "ret": ret,
                                "pnl": ret * capital, "bars": (i + 1) - pos["entry_i"], "reason": reason})
@@ -196,9 +236,9 @@ def swing_backtest(df: pd.DataFrame, capital: float = CAPITAL, stop_pct: float =
     return d, pd.DataFrame(trades)
 
 
-def position_state(d: pd.DataFrame, trades: pd.DataFrame, stop_pct: float = STOP_PCT) -> dict:
-    """FLAT / HOLDING / SOLD, derived from the backtest so SELL/HOLD only mean
-    something when there's a real position."""
+def position_state(d: pd.DataFrame, trades: pd.DataFrame,
+                   config: QuantConfig = DEFAULT_CONFIG) -> dict:
+    """Return FLAT, HOLDING, EXIT_PENDING, or SOLD from the model history."""
     if trades is None or len(trades) == 0:
         return {"state": "FLAT"}
     close = float(d["Close"].iloc[-1])
@@ -206,14 +246,27 @@ def position_state(d: pd.DataFrame, trades: pd.DataFrame, stop_pct: float = STOP
     last = trades.iloc[-1]
     if last["reason"] == "open":
         entry = float(last["entry_price"]); gain = (close - entry) / entry * 100.0
-        return {"state": "HOLDING", "entry_price": round(entry, 2),
-                "entry_date": str(pd.Timestamp(last["entry_date"]).date()),
-                "gain_%": round(gain, 2), "bars_held": int(last["bars"]),
-                "z_now": round(z, 2) if z == z else None}
-    matches = d.index[d["Date"] == last["exit_date"]]
-    if len(matches) and matches[-1] >= len(d) - 2:
+        peak = max(float(last["peak"]), float(d["High"].iloc[-1]))
+        reason, initial_level, trailing_level = _close_exit_state(
+            close, entry, peak, float(d["ATR"].iloc[-1]), float(d["SMA50"].iloc[-1]),
+            int(last["bars"]), config,
+        )
+        state = "EXIT_PENDING" if reason is not None else "HOLDING"
+        result = {"state": state, "entry_price": round(entry, 2),
+                  "entry_date": str(pd.Timestamp(last["entry_date"]).date()),
+                  "gain_%": round(gain, 2), "bars_held": int(last["bars"]),
+                  "z_now": round(z, 2) if z == z else None}
+        if reason is not None:
+            result.update({"exit_reason": reason,
+                           "initial_close_level": round(initial_level, 2),
+                           "trailing_close_level": (round(float(trailing_level), 2)
+                                                    if np.isfinite(trailing_level) else None)})
+        return result
+    exit_date = pd.Timestamp(last["exit_date"])
+    latest_date = pd.Timestamp(d["Date"].iloc[-1])
+    if exit_date == latest_date:
         return {"state": "SOLD", "exit_reason": str(last["reason"]),
-                "exit_date": str(pd.Timestamp(last["exit_date"]).date()),
+                "exit_date": str(exit_date.date()),
                 "ret_%": round(float(last["ret"]) * 100.0, 2),
                 "entry_price": round(float(last["entry_price"]), 2)}
     return {"state": "FLAT"}
@@ -239,14 +292,20 @@ def compute_stats(t: pd.DataFrame, capital: float = CAPITAL) -> dict:
 
 # ----------------------------- $100 portfolio backtest -----------------------------
 def portfolio_backtest(history: dict, start_cash: float = 100.0, max_positions: int = 8,
-                       stop_pct: float = STOP_PCT, ride_mode: str | None = None):
-    """Trade the strategy across the universe with `start_cash`. Fixed-fraction
-    sizing (1/max_positions of equity per trade). Returns summary + equity curve."""
+                       config: QuantConfig = DEFAULT_CONFIG):
+    """Trade the model across the universe with fixed-fraction position sizing.
+
+    Unexpected per-ticker failures are returned in ``model_errors`` instead of
+    being silently omitted from an apparently complete portfolio result.
+    """
     all_trades = []
+    model_errors = []
     for tk, df in history.items():
         try:
-            _, t = swing_backtest(df, stop_pct=stop_pct, ride_mode=ride_mode)
-        except Exception:
+            _, t = swing_backtest(df, config=config)
+        except Exception as exc:
+            model_errors.append({"ticker": tk, "error_type": type(exc).__name__,
+                                 "error_message": str(exc)})
             continue
         for _, r in t.iterrows():
             if r["reason"] == "open":
@@ -284,7 +343,11 @@ def portfolio_backtest(history: dict, start_cash: float = 100.0, max_positions: 
         "win_rate_%": round((rr > 0).mean() * 100, 1) if len(rr) else 0.0,
         "avg_win_%": round(wins.mean() * 100, 1) if len(wins) else 0.0,
         "avg_trade_%": round(rr.mean() * 100, 2) if len(rr) else 0.0,
-        "max_positions": max_positions, "stop_pct": stop_pct, "ride_mode": ride_mode or RIDE_MODE,
+        "max_positions": max_positions,
+        "close_exit_pct": config.close_exit_pct, "ride_mode": config.ride_mode,
+        "tickers_requested": len(history),
+        "tickers_backtested": len(history) - len(model_errors),
+        "model_errors": model_errors,
         "equity_curve": eq,
     }
 
@@ -308,15 +371,16 @@ def _band_read(z: float) -> str:
     return f"+{z:.1f} sigma above band - riding above support"
 
 
-def ride_plan(stop_pct: float = STOP_PCT, ride_mode: str | None = None) -> str:
-    mode, atr_mult, trail_pct = _ride_params(ride_mode or RIDE_MODE)
-    if mode == "chandelier":  ride = f"trail {atr_mult:g}xATR"
-    elif mode == "pct":       ride = f"trail {trail_pct:.0%} off peak"
-    else:                     ride = "hold above 50-SMA"
-    return f"cut at {stop_pct:.0%}, then ride ({ride})"
+def ride_plan(config: QuantConfig = DEFAULT_CONFIG) -> str:
+    mode, atr_mult, trail_pct = _ride_params(config.ride_mode)
+    if mode == "chandelier":  ride = f"{atr_mult:g}xATR trailing close threshold"
+    elif mode == "pct":       ride = f"{trail_pct:.0%} trailing close threshold"
+    else:                     ride = "close below 50-SMA"
+    return (f"next-open exit after a close {config.close_exit_pct:.0%} below entry; "
+            f"then {ride} (gap risk)")
 
 
-def live_signal(df: pd.DataFrame) -> dict:
+def live_signal(df: pd.DataFrame, config: QuantConfig = DEFAULT_CONFIG) -> dict:
     d = compute_features(df)
     r = d.iloc[-1]
     c = float(r["Close"]); bb = float(r["band_bot"]); bt = float(r["band_top"])
@@ -333,7 +397,7 @@ def live_signal(df: pd.DataFrame) -> dict:
         "obv_rising": bool(r["obv_rising"]), "above_50": bool(r["above_50"]),
         "sma20_up": bool(r["sma20_up"]), "mom_63_%": _fnum(r["mom_63_%"], 1),
         "dip": bool(r["dip"]), "trigger": bool(r["trigger"]),
-        "exit_plan": ride_plan(), "band_read": _band_read(z),
+        "exit_plan": ride_plan(config), "band_read": _band_read(z),
         "s_oversold": _fnum(r["c_oversold"] * 100, 0), "s_stretch": _fnum(r["c_stretch"] * 100, 0),
         "s_volume": _fnum(r["c_volume"] * 100, 0), "s_reversal": _fnum(r["c_reversal"] * 100, 0),
         "s_trend": _fnum(r["c_trend"] * 100, 0),

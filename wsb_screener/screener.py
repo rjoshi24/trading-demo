@@ -57,7 +57,7 @@ def classify(sig, mode, rsi_buy):
 
     # --- in a position already ---
     if sig["in_position"]:
-        if rec.startswith("SELL"):
+        if rec.startswith(("SELL", "EXIT")):
             return "SELL / EXIT", 0.0, need, prox, rec
         return "IN POSITION", 50.0, need, prox, rec
 
@@ -142,7 +142,7 @@ def screen_ticker(ticker, weekly, meta=None):
 
 
 # group ordering + within-group sort keys
-GROUP_ORDER = ["BUY NOW", "CLOSE TO ENTERING", "IN POSITION", "SELL / EXIT", "WATCH", "SKIPPED"]
+GROUP_ORDER = ["BUY NOW", "CLOSE TO ENTERING", "IN POSITION", "SELL / EXIT", "WATCH", "SKIPPED", "ERROR"]
 
 
 def rank_group(df_group, group):
@@ -159,19 +159,39 @@ def rank_group(df_group, group):
     return df_group.sort_values("mentions", ascending=False)
 
 
-def run_screener(history: dict, metas: dict, progress_every: int = 25):
-    """history: {ticker: weekly df}, metas: {ticker: {rank,mentions,name}}.
-    Returns a single ranked DataFrame."""
+def _data_error_row(ticker: str, meta: dict, failure: dict) -> dict:
+    stage = failure.get("error_stage", "data")
+    error_type = failure.get("error_type", "DataError")
+    message = failure.get("error_message", "price data unavailable")
+    return {
+        "ticker": ticker, "name": meta.get("name", ""),
+        "wsb_rank": meta.get("rank"), "mentions": meta.get("mentions"),
+        "group": "ERROR", "error_stage": stage, "error_type": error_type,
+        "error_message": message,
+        "note": f"data-stage failure ({stage}): {error_type}: {message}",
+    }
+
+
+def run_screener(history: dict, metas: dict, progress_every: int = 25,
+                 data_failures: dict | None = None):
+    """Screen history and preserve optional per-symbol data failures as ERROR rows."""
     rows = []
     tickers = list(metas.keys())
+    data_failures = data_failures or {}
     for i, tk in enumerate(tickers, 1):
-        try:
-            row = screen_ticker(tk, history.get(tk), metas.get(tk))
-        except Exception as e:
-            row = {"ticker": tk, "name": metas.get(tk, {}).get("name", ""),
-                   "wsb_rank": metas.get(tk, {}).get("rank"),
-                   "mentions": metas.get(tk, {}).get("mentions"),
-                   "group": "SKIPPED", "note": f"error: {e!r}"}
+        failure = data_failures.get(tk)
+        if failure is not None:
+            row = _data_error_row(tk, metas.get(tk, {}), failure)
+        else:
+            try:
+                row = screen_ticker(tk, history.get(tk), metas.get(tk))
+            except Exception as exc:
+                row = {"ticker": tk, "name": metas.get(tk, {}).get("name", ""),
+                       "wsb_rank": metas.get(tk, {}).get("rank"),
+                       "mentions": metas.get(tk, {}).get("mentions"),
+                       "group": "ERROR", "error_stage": "model",
+                       "error_type": type(exc).__name__, "error_message": str(exc),
+                       "note": f"model error: {type(exc).__name__}: {exc}"}
         rows.append(row)
         if progress_every and i % progress_every == 0:
             print(f"  ...screened {i}/{len(tickers)}")
