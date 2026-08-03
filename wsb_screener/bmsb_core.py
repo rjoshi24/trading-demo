@@ -6,7 +6,11 @@ Faithful port of the BMSB (Bull Market Support Band) engine from
 
 The band = SMA(sma_len) + EMA(ema_len); band_top = max(SMA,EMA),
 band_bot = min(SMA,EMA). Entry modes: anticipate / reclaim / breakout /
-hybrid_e. Exits: fakeout-stop, confirm-fail, band-loss.
+hybrid_e. Exits: close-threshold, confirm-fail, band-loss.
+
+All exit conditions are evaluated on a completed bar and filled at the next
+available open. The percentage threshold is not a hard/resting stop; gaps and
+unmodeled slippage can produce a materially worse fill.
 
 Nothing here changes the strategy math from the notebook -- it is copied
 so the screener produces the same signals the notebook would.
@@ -63,7 +67,7 @@ def bmsb_backtest(df, sma_len, ema_len, mode="anticipate", rsi_buy=45,
             held = i - pos["entry_i"]
             exit_now, reason = False, ""
             if r.Close <= pos["entry_price"] * (1 - stop_pct):
-                exit_now, reason = True, "fakeout-stop"
+                exit_now, reason = True, "close-threshold"
             elif (not pos["reclaimed"]) and held >= confirm_bars:
                 exit_now, reason = True, "confirm-fail"
             elif pos["reclaimed"] and r.Close < r.band_bot:
@@ -157,7 +161,7 @@ def bmsb_live(df, sma_len, ema_len, mode, rsi_buy, stop_pct, confirm_bars):
     if in_pos:
         ep = float(t.iloc[-1]["entry_price"])
         if close <= ep * (1 - stop_pct):
-            rec = "SELL (fakeout stop hit)"
+            rec = "EXIT (close threshold breached; act next open, gap risk)"
         elif close < band_bot:
             rec = "SELL (lost the band)"
         else:

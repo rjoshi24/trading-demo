@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trading-research-demo"
+version = "0.1.0"
+description = "Transparent notebook and CLI demos for long-only technical-strategy research"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "All rights reserved" }
+authors = [{ name = "Trading Demo Contributors" }]
+dependencies = [
+  "numpy>=1.24,<3",
+  "pandas>=2.0,<3",
+  "requests>=2.31,<3",
+  "yfinance>=0.2.40,<2",
+]
+
+[project.optional-dependencies]
+notebooks = [
+  "jupyter>=1.0,<2",
+  "matplotlib>=3.7,<4",
+]
+
+[project.scripts]
+trading-bmsb-screen = "wsb_screener.run:main"
+trading-quant-screen = "wsb_screener.run_quant:main"
+
+[tool.setuptools.packages.find]
+include = ["wsb_screener*"]

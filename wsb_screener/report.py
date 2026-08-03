@@ -9,16 +9,24 @@ import datetime as dt
 import pandas as pd
 
 GROUP_BLURB = {
-    "BUY NOW": "Strategy fires a **fresh BUY** on the latest weekly bar. These are the "
-               "actionable entries right now (act at next open, per the strategy).",
-    "CLOSE TO ENTERING": "Flat and **almost** triggering: price is within a few percent of the "
-                         "entry trigger, or already sitting in the anticipate buy-zone below the "
-                         "band waiting on a momentum flip. These are the watch-closely names.",
-    "IN POSITION": "The strategy would **already be long and holding** (price is above the band, "
-                   "riding the trend). Not a fresh entry - a new buyer here is chasing an extended move.",
-    "SELL / EXIT": "The strategy would be **exiting** (lost the band or hit the fakeout stop).",
-    "WATCH": "Flat and still **far** from any entry trigger. Nothing to do yet.",
-    "SKIPPED": "Not enough clean price history to run the strategy.",
+    "BUY NOW": "**The simulated model produced a fresh weekly entry signal while flat.** This "
+               "label describes model state, not a recommendation. Under the model's execution "
+               "assumptions, any entry is filled at the next open.",
+    "CLOSE TO ENTERING": "**The simulated model remains flat and is near an entry condition.** "
+                         "Price is within a few percent of the trigger, or is in the anticipate "
+                         "buy-zone below the band awaiting a momentum flip. This is a proximity "
+                         "state, not a recommendation.",
+    "IN POSITION": "**The simulated model already holds one position.** Price remains above the "
+                   "band while the model continues its trend-holding state; this is not a fresh "
+                   "entry signal or recommendation.",
+    "SELL / EXIT": "**The simulated model produced an exit state** after a band loss or "
+                   "close-threshold breach. Signals are evaluated on the close and modeled fills "
+                   "occur at the next open, which can gap beyond the threshold.",
+    "WATCH": "**The simulated model is flat with no current entry signal.** Price remains far "
+             "from the model's entry conditions.",
+    "SKIPPED": "The simulated strategy did not run because acquired price history was too short "
+               "or no configuration produced a trade.",
+    "ERROR": "The data or model pipeline failed for this row; see `error_stage` for provenance.",
 }
 
 BUY_COLS = ["group_rank", "ticker", "name", "close", "readiness", "recommendation",
@@ -75,7 +83,7 @@ def build_markdown(df: pd.DataFrame, universe_n: int, signal_date: str) -> str:
 
     out.append("## Summary\n")
     out.append("| Group | Count |\n| --- | --- |")
-    for g in ["BUY NOW", "CLOSE TO ENTERING", "IN POSITION", "SELL / EXIT", "WATCH", "SKIPPED"]:
+    for g in ["BUY NOW", "CLOSE TO ENTERING", "IN POSITION", "SELL / EXIT", "WATCH", "SKIPPED", "ERROR"]:
         if g in counts:
             out.append(f"| {g} | {counts[g]} |")
     out.append("")
@@ -98,5 +106,12 @@ def build_markdown(df: pd.DataFrame, universe_n: int, signal_date: str) -> str:
         out.append(f"## SKIPPED  ({len(skipped)})\n")
         out.append(GROUP_BLURB["SKIPPED"] + "\n")
         out.append(", ".join(f"{r.ticker} ({r.note})" for _, r in skipped.iterrows()) + "\n")
+
+    errors = df[df["group"] == "ERROR"]
+    if not errors.empty:
+        out.append(f"## ERROR  ({len(errors)})\n")
+        out.append(GROUP_BLURB["ERROR"] + "\n")
+        out.append(_md_table(errors, ["group_rank", "ticker", "name", "error_stage",
+                                      "error_type", "error_message", "note"]))
 
     return "\n".join(out)
